@@ -64,6 +64,8 @@ applies once Google has granted access; it is not a workaround for onboarding.
    fingerprint**. It must be the certificate used for that exact APK. Google
    Identity Services identifies the app from the package/certificate pair;
    there is no client secret to paste into the phone or source repository.
+   The delivered APK's public fingerprint is in
+   [docs/apk-signing-certificate.txt](docs/apk-signing-certificate.txt).
 4. Sign into Google Health with the Google account holding the Fitbit history.
 5. In Pixel Data Vault tap **Connect Google Health / Fitbit**. Approve the read
    scopes you want. The app verifies the linked account through `users/me/identity`.
@@ -142,6 +144,12 @@ python3 -m unittest discover -s tools -p 'test_*.py' -v
 The GitHub Actions workflow builds the APK and runs these checks. The APK is at
 `app/build/outputs/apk/debug/app-debug.apk`. Debug APK certificates vary by build
 environment; register the certificate of the APK that you install.
+
+The pinned Health Connect alpha SDK needs AGP 9.1.1 and compile SDK 37.
+Its companion status constants cause false `WrongConstant` lint errors under
+this toolchain. Only the two SDK/feature availability comparisons suppress
+that rule, using the SDK's own declared constants. Other lint errors still
+fail the build. Personal-app text/localization and KTX style warnings remain.
 
 Regression tests cover pagination beyond 2,000 records, empty pages with more
 data, repeated-token failure, raw sample/stage preservation, explicit distance

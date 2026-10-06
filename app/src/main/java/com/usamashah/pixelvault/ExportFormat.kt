@@ -62,21 +62,21 @@ object PublicRecordJson {
             require(cls.name.startsWith("androidx.health.connect.client.")) {
                 "Unsupported public data class ${cls.name}"
             }
-                val getters = methods.getOrPut(cls) {
-                    cls.methods.filter {
-                        !Modifier.isStatic(it.modifiers) && it.parameterCount == 0 &&
-                        it.name != "getClass" && !it.name.contains('$') &&
-                        (it.name.matches(Regex("get[A-Z].*")) || it.name.matches(Regex("is[A-Z].*")))
-                    }.sortedBy { it.name }
+            val getters = methods.getOrPut(cls) {
+                cls.methods.filter {
+                    !Modifier.isStatic(it.modifiers) && it.parameterCount == 0 &&
+                    it.name != "getClass" && !it.name.contains('$') &&
+                    (it.name.matches(Regex("get[A-Z].*")) || it.name.matches(Regex("is[A-Z].*")))
+                }.sortedBy { it.name }
+            }
+            JsonObject().apply {
+                addProperty("objectType", cls.simpleName)
+                for (getter in getters) {
+                    val name = if (getter.name.startsWith("get")) getter.name.substring(3).replaceFirstChar { it.lowercase() }
+                               else getter.name
+                    add(name, encode(getter.invoke(value)))
                 }
-                JsonObject().apply {
-                    addProperty("objectType", cls.simpleName)
-                    for (getter in getters) {
-                        val name = if (getter.name.startsWith("get")) getter.name.substring(3).replaceFirstChar { it.lowercase() }
-                                   else getter.name
-                        add(name, encode(getter.invoke(value)))
-                    }
-                }
+            }
         }
     }
 }

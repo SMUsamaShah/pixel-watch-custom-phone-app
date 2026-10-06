@@ -2,8 +2,12 @@
 
 package com.usamashah.pixelvault
 
+import android.annotation.SuppressLint
+import android.content.Context
 import androidx.health.connect.client.HealthConnectClient
+import androidx.health.connect.client.HealthConnectClient.Companion.SDK_AVAILABLE
 import androidx.health.connect.client.HealthConnectFeatures
+import androidx.health.connect.client.HealthConnectFeatures.Companion.FEATURE_STATUS_AVAILABLE
 import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.*
 import androidx.health.connect.client.request.*
@@ -45,8 +49,15 @@ object HealthConnectFeed {
         "PRACTITIONER_DETAILS", "VISITS"
     )
 
+    // AGP 9.1.1 lint misidentifies the pinned alpha SDK's companion IntDef constants.
+    // Use the SDK's declared constants; suppress only these two status comparisons.
+    @SuppressLint("WrongConstant")
+    fun providerAvailable(context: Context): Boolean =
+        HealthConnectClient.getSdkStatus(context) == SDK_AVAILABLE
+
+    @SuppressLint("WrongConstant")
     fun available(client: HealthConnectClient, feature: Int): Boolean =
-        client.features.getFeatureStatus(feature) == HealthConnectFeatures.FEATURE_STATUS_AVAILABLE
+        client.features.getFeatureStatus(feature) == FEATURE_STATUS_AVAILABLE
 
     fun supported(client: HealthConnectClient, type: KClass<out Record>): Boolean =
         features[type]?.let { available(client, it) } ?: true

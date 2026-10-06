@@ -121,7 +121,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun grantPermissions() {
-        if (HealthConnectClient.getSdkStatus(this) != HealthConnectClient.SDK_AVAILABLE) {
+        if (!HealthConnectFeed.providerAvailable(this)) {
             status.text = "Health Connect is unavailable or needs a provider update."
             return
         }

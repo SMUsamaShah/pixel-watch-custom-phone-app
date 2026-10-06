@@ -5,6 +5,7 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.ServiceInfo
 import android.net.Uri
+import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.health.connect.client.HealthConnectClient
 import androidx.work.*
@@ -28,7 +29,7 @@ class ExportWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             setProgress(workDataOf("message" to "Reading all accessible history…"))
             val manifest: JsonObject
             VaultArchive(pending).use { vault ->
-                if (HealthConnectClient.getSdkStatus(applicationContext) == HealthConnectClient.SDK_AVAILABLE) {
+                if (HealthConnectFeed.providerAvailable(applicationContext)) {
                     val client = HealthConnectClient.getOrCreate(applicationContext)
                     try {
                         HealthConnectFeed.export(client, vault, inputData.getBoolean("scheduled", false), prefs.getBoolean("medical", false))
@@ -84,7 +85,9 @@ class ExportWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             .setContentTitle("Pixel Data Vault")
             .setContentText("Exporting source-labelled health records")
             .setOngoing(true).build()
-        return ForegroundInfo(7, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        return if (Build.VERSION.SDK_INT >= 29) {
+            ForegroundInfo(7, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else ForegroundInfo(7, notification)
     }
 
     companion object {
