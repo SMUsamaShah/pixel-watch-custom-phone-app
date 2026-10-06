@@ -33,7 +33,7 @@ class ExportWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                     try {
                         HealthConnectFeed.export(client, vault, inputData.getBoolean("scheduled", false), prefs.getBoolean("medical", false))
                     } catch (e: Exception) {
-                        if (e is kotlinx.coroutines.CancellationException) throw e
+                        if (e is kotlinx.coroutines.CancellationException || e is VaultWriteException) throw e
                         vault.feedStatus[HealthConnectFeed.FEED] = "access_error_${e.javaClass.simpleName}"
                         val reached = vault.coverage.map { it.type }.toSet()
                         HealthConnectFeed.recordTypes.filter { it.java.simpleName !in reached }.forEach {
@@ -91,6 +91,20 @@ class ExportWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         private val exportMutex = Mutex()
         private const val WORK = "vault-export"
         private const val DAILY = "vault-daily"
+        /** Selecting a file and scheduled export cannot write over one another. */
+        suspend fun selectDestination(context: Context, uri: Uri): Boolean = exportMutex.withLock {
+            withContext(Dispatchers.IO) {
+                val file = File(context.filesDir, "exports/latest.zip")
+                if (file.exists()) {
+                    context.contentResolver.openOutputStream(uri, "wt")?.use { out ->
+                        file.inputStream().use { it.copyTo(out) }
+                    } ?: error("Destination unavailable")
+                }
+                context.getSharedPreferences("vault", Context.MODE_PRIVATE).edit()
+                    .putString("destination", uri.toString()).apply()
+                file.exists()
+            }
+        }
         fun once(context: Context) = WorkManager.getInstance(context).enqueueUniqueWork(
             WORK, ExistingWorkPolicy.KEEP, OneTimeWorkRequestBuilder<ExportWorker>().addTag(WORK).build()
         )

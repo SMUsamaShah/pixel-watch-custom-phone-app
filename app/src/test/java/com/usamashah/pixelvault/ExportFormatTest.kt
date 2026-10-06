@@ -2,7 +2,7 @@ package com.usamashah.pixelvault
 
 import androidx.health.connect.client.records.*
 import androidx.health.connect.client.records.metadata.Metadata
-import androidx.health.connect.client.units.Length
+import androidx.health.connect.client.units.*
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import kotlinx.coroutines.runBlocking
@@ -60,6 +60,26 @@ class ExportFormatTest {
         val length = PublicRecordJson.encode(Length.kilometers(2.5)).asJsonObject
         assertEquals("m", length["unit"].asString)
         assertEquals(2500.0, length["value"].asDouble, 0.0001)
+    }
+
+    @Test fun allSdkQuantityKindsUseExplicitVerifiedUnits() {
+        val cases = listOf(
+            Triple(Mass.kilograms(2.0), "g", 2000.0),
+            Triple(Energy.calories(5000.0), "kcal", 5.0),
+            Triple(Power.watts(100.0), "W", 100.0),
+            Triple(Pressure.millimetersOfMercury(120.0), "mmHg", 120.0),
+            Triple(Velocity.kilometersPerHour(3.6), "m/s", 1.0),
+            Triple(Volume.milliliters(250.0), "L", 0.25),
+            Triple(Temperature.fahrenheit(98.6), "degC", 37.0),
+            Triple(TemperatureDelta.fahrenheit(1.8), "degC difference", 1.0),
+            Triple(Percentage(97.0), "%", 97.0),
+            Triple(BloodGlucose.millimolesPerLiter(5.0), "mmol/L", 5.0)
+        )
+        for ((value, unit, expected) in cases) {
+            val json = PublicRecordJson.encode(value).asJsonObject
+            assertEquals(unit, json["unit"].asString)
+            assertEquals(expected, json["value"].asDouble, 0.0001)
+        }
     }
 
     @Test fun rawSleepStagesStayDistinctFromTheSessionInterval() {

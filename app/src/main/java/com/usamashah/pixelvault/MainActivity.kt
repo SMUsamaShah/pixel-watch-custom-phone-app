@@ -19,7 +19,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
-import java.io.File
 
 class MainActivity : ComponentActivity() {
     private val prefs by lazy { getSharedPreferences("vault", Context.MODE_PRIVATE) }
@@ -45,15 +44,10 @@ class MainActivity : ComponentActivity() {
         if (uri != null) lifecycleScope.launch {
             try {
                 contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-                prefs.edit().putString("destination", uri.toString()).apply()
-                val file = File(filesDir, "exports/latest.zip")
-                if (file.exists()) withContext(Dispatchers.IO) {
-                    contentResolver.openOutputStream(uri, "wt")?.use { out -> file.inputStream().use { it.copyTo(out) } }
-                        ?: error("Destination unavailable")
-                }
-                status.text = "Export file selected. ${if (file.exists()) "The latest ZIP has been saved." else "Tap Export all accessible history."}"
+                val saved = ExportWorker.selectDestination(this@MainActivity, uri)
+                status.text = "Export file selected. ${if (saved) "The latest ZIP has been saved." else "Tap Export all accessible history."}"
             } catch (e: Exception) {
-                prefs.edit().remove("destination").apply()
+                if (e is kotlinx.coroutines.CancellationException) throw e
                 status.text = "This destination could not be saved (${e.javaClass.simpleName}). Choose a file location that allows ongoing write access."
             }
         }

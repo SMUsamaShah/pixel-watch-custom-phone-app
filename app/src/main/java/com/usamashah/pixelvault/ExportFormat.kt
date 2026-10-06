@@ -1,8 +1,10 @@
 package com.usamashah.pixelvault
 
 import com.google.gson.*
+import androidx.health.connect.client.units.*
 import kotlinx.coroutines.CancellationException
 import java.io.File
+import java.io.IOException
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 import java.time.*
@@ -27,16 +29,10 @@ suspend fun <T> readEveryPage(fetch: suspend (String?) -> Page<T>, consume: susp
 /** Serialize the SDK's PUBLIC data properties, including nested samples and metadata. */
 object PublicRecordJson {
     private val methods = ConcurrentHashMap<Class<*>, List<Method>>()
-    private val quantities = mapOf(
-        "Length" to ("getInMeters" to "m"), "Mass" to ("getInGrams" to "g"),
-        "Energy" to ("getInKilocalories" to "kcal"), "Power" to ("getInWatts" to "W"),
-        "Pressure" to ("getInMillimetersOfMercury" to "mmHg"),
-        "Velocity" to ("getInMetersPerSecond" to "m/s"), "Volume" to ("getInLiters" to "L"),
-        "Temperature" to ("getInCelsius" to "degC"),
-        "TemperatureDelta" to ("getInCelsius" to "degC difference"),
-        "Percentage" to ("getValue" to "%"),
-        "BloodGlucose" to ("getInMillimolesPerLiter" to "mmol/L")
-    )
+    private fun quantity(value: Double, unit: String) = JsonObject().apply {
+        addProperty("value", value)
+        addProperty("unit", unit)
+    }
 
     fun encode(value: Any?): JsonElement = when (value) {
         null -> JsonNull.INSTANCE
@@ -46,6 +42,18 @@ object PublicRecordJson {
         is Number -> JsonPrimitive(value)
         is Boolean -> JsonPrimitive(value)
         is Instant, is ZoneOffset, is LocalDate, is LocalDateTime, is Duration -> JsonPrimitive(value.toString())
+        is android.net.Uri -> JsonPrimitive(value.toString())
+        is Length -> quantity(value.inMeters, "m")
+        is Mass -> quantity(value.inGrams, "g")
+        is Energy -> quantity(value.inKilocalories, "kcal")
+        is Power -> quantity(value.inWatts, "W")
+        is Pressure -> quantity(value.inMillimetersOfMercury, "mmHg")
+        is Velocity -> quantity(value.inMetersPerSecond, "m/s")
+        is Volume -> quantity(value.inLiters, "L")
+        is Temperature -> quantity(value.inCelsius, "degC")
+        is TemperatureDelta -> quantity(value.inCelsius, "degC difference")
+        is Percentage -> quantity(value.value, "%")
+        is BloodGlucose -> quantity(value.inMillimolesPerLiter, "mmol/L")
         is Enum<*> -> JsonPrimitive(value.name)
         is Iterable<*> -> JsonArray().also { a -> value.forEach { a.add(encode(it)) } }
         is Map<*, *> -> JsonObject().also { o -> value.forEach { (k, v) -> o.add(k.toString(), encode(v)) } }
@@ -54,13 +62,6 @@ object PublicRecordJson {
             require(cls.name.startsWith("androidx.health.connect.client.")) {
                 "Unsupported public data class ${cls.name}"
             }
-            val q = quantities[cls.simpleName]
-            if (q != null && cls.name.contains(".units.")) {
-                JsonObject().apply {
-                    add("value", encode(cls.getMethod(q.first).invoke(value)))
-                    addProperty("unit", q.second)
-                }
-            } else {
                 val getters = methods.getOrPut(cls) {
                     cls.methods.filter {
                         !Modifier.isStatic(it.modifiers) && it.parameterCount == 0 &&
@@ -76,10 +77,12 @@ object PublicRecordJson {
                         add(name, encode(getter.invoke(value)))
                     }
                 }
-            }
         }
     }
 }
+
+/** Disk failures invalidate the whole archive, unlike a failure reading one source. */
+class VaultWriteException(cause: IOException) : IOException("Unable to write export archive", cause)
 
 data class Coverage(
     val feed: String,
@@ -147,24 +150,29 @@ class VaultArchive(val file: File, val startedAt: Instant = Instant.now()) : Aut
     val feedStatus = sortedMapOf<String, String>()
     val notes = mutableListOf<String>()
     private val gson = GsonBuilder().serializeNulls().disableHtmlEscaping().create()
+    private fun archiveIO(block: () -> Unit) {
+        try { block() } catch (e: IOException) { throw VaultWriteException(e) }
+    }
 
     suspend fun stream(feed: String, type: String, body: suspend (suspend (JsonObject, String) -> Unit) -> Unit) {
         val c = Coverage(feed, type)
         coverage += c
-        zip.putNextEntry(ZipEntry("$feed/$type.ndjson"))
+        archiveIO { zip.putNextEntry(ZipEntry("$feed/$type.ndjson")) }
         try {
             body { raw, origin ->
-                zip.write((gson.toJson(raw) + "\n").toByteArray(Charsets.UTF_8))
+                archiveIO { zip.write((gson.toJson(raw) + "\n").toByteArray(Charsets.UTF_8)) }
                 c.observe(raw, origin)
             }
             c.status = "read_complete"
         } catch (e: CancellationException) {
             throw e
+        } catch (e: VaultWriteException) {
+            throw e
         } catch (e: Exception) {
             c.status = "incomplete"
             c.error = if (e is CloudApiException) e.safeReason else e.javaClass.simpleName
         } finally {
-            zip.closeEntry()
+            archiveIO { zip.closeEntry() }
         }
     }
 
@@ -193,9 +201,11 @@ class VaultArchive(val file: File, val startedAt: Instant = Instant.now()) : Aut
                 "Medical resources, when enabled, include only records actually stored in Health Connect."
             )
         )).asJsonObject
-        zip.putNextEntry(ZipEntry("manifest.json"))
-        zip.write(gson.toJson(manifest).toByteArray(Charsets.UTF_8))
-        zip.closeEntry()
+        archiveIO {
+            zip.putNextEntry(ZipEntry("manifest.json"))
+            zip.write(gson.toJson(manifest).toByteArray(Charsets.UTF_8))
+            zip.closeEntry()
+        }
         return manifest
     }
 
