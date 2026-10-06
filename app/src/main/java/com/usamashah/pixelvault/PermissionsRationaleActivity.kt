@@ -10,9 +10,12 @@ class PermissionsRationaleActivity : Activity() {
         super.onCreate(savedInstanceState)
         setContentView(
             TextView(this).apply {
-                text = "Pixel Data Vault reads your heart-rate records only after you grant access. " +
-                    "It keeps the raw timestamps and BPM samples intact and does not upload them. " +
-                    "Exports happen only when you choose a destination."
+                text = "Pixel Data Vault reads only the Health Connect types you allow, including " +
+                    "historical and background data if you grant those permissions. Medical records are optional. " +
+                    "It preserves individual measurements, timestamps, stages, units and source metadata. " +
+                    "If you connect Google Health, it also reads your account through Google's official API. " +
+                    "It saves ZIP files only to a destination you choose; daily updates require you to enable the switch. " +
+                    "There is no developer server, analytics or advertising."
                 setPadding(48, 64, 48, 64)
             }
         )

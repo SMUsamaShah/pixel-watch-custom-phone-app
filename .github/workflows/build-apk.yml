@@ -29,7 +29,8 @@ jobs:
       - name: Build debug APK
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon :app:assembleDebug
+          ./gradlew --no-daemon :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
+          python3 -m unittest discover -s tools -p 'test_*.py' -v
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
