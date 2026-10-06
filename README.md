@@ -131,7 +131,8 @@ invent units or produce health advice from stale measurements.
 
 ## Build and verification
 
-Use JDK 17 and Android SDK 36:
+Use JDK 17 and Android SDK 37 (build tools 36.0.0). The app still supports
+Android 9 and later; compiling against SDK 37 does not change its minimum API:
 
 ```bash
 ./gradlew --no-daemon :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
