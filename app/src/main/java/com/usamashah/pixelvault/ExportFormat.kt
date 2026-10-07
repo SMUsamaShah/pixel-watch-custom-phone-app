@@ -3,6 +3,10 @@ package com.usamashah.pixelvault
 import com.google.gson.*
 import androidx.health.connect.client.units.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
 import java.io.File
 import java.io.IOException
 import java.lang.reflect.Method
@@ -19,11 +23,32 @@ suspend fun <T> readEveryPage(fetch: suspend (String?) -> Page<T>, consume: susp
     var token: String? = null
     val seen = HashSet<String>()
     do {
+        currentCoroutineContext().ensureActive()
         val page = fetch(token)
         for (record in page.records) consume(record)
         token = page.nextToken?.takeIf { it.isNotEmpty() }
         check(token == null || seen.add(token)) { "Repeated pagination token; export incomplete" }
     } while (token != null)
+}
+
+class SourceReadException(message: String) : IOException(message)
+
+/** A stalled provider must produce a visible error, not wait indefinitely. */
+suspend fun <T> timedSourceRead(timeoutMillis: Long = 60_000, block: suspend () -> T): T = try {
+    withTimeout(timeoutMillis) { block() }
+} catch (_: TimeoutCancellationException) {
+    // An external cancellation must still cancel the export.
+    currentCoroutineContext().ensureActive()
+    throw SourceReadException("Source did not respond within ${timeoutMillis / 1000} seconds")
+}
+
+fun sourceError(e: Exception): String = when (e) {
+    is CloudApiException -> e.safeReason
+    is SourceReadException -> e.message ?: "Source read failed"
+    is SecurityException -> "Read permission denied by the provider"
+    is IllegalStateException -> if (e.message?.startsWith("Repeated pagination token") == true)
+        "Provider repeated a page token; remaining records could not be read" else e.javaClass.simpleName
+    else -> e.javaClass.simpleName
 }
 
 /** Serialize the SDK's PUBLIC data properties, including nested samples and metadata. */
@@ -97,6 +122,8 @@ data class Coverage(
     var error: String? = null,
     val origins: MutableMap<String, Long> = sortedMapOf()
 ) {
+    @Transient private var firstInstant: Instant? = null
+    @Transient private var latestInstant: Instant? = null
     fun observe(json: JsonObject, origin: String) {
         records++
         origins[origin] = (origins[origin] ?: 0) + 1
@@ -107,11 +134,18 @@ data class Coverage(
         if (values == null) return
         val sampleArray = values.getAsJsonArray("samples") ?: values.getAsJsonArray("deltas")
         samples += sampleArray?.size()?.toLong() ?: 0
-        val instants = mutableListOf<String>()
         fun addTime(o: JsonObject, key: String) {
             val v = o.get(key)
             if (v?.isJsonPrimitive == true) {
-                try { instants += Instant.parse(v.asString).toString() } catch (_: DateTimeException) { }
+                try {
+                    val t = Instant.parse(v.asString)
+                    if (firstInstant == null || t < firstInstant) {
+                        firstInstant = t; firstMeasurementAt = t.toString()
+                    }
+                    if (latestInstant == null || t > latestInstant) {
+                        latestInstant = t; latestMeasurementAt = t.toString()
+                    }
+                } catch (_: DateTimeException) { }
             }
         }
         // Series parent intervals can extend past the actual last sample.
@@ -124,10 +158,6 @@ data class Coverage(
         }
         values.getAsJsonObject("interval")?.let { addTime(it, "startTime"); addTime(it, "endTime") }
         values.getAsJsonObject("sampleTime")?.let { addTime(it, "physicalTime") }
-        for (t in instants) {
-            if (firstMeasurementAt == null || Instant.parse(t) < Instant.parse(firstMeasurementAt)) firstMeasurementAt = t
-            if (latestMeasurementAt == null || Instant.parse(t) > Instant.parse(latestMeasurementAt)) latestMeasurementAt = t
-        }
         val date = values.get("date")
         val localDate = when {
             date?.isJsonPrimitive == true -> runCatching { LocalDate.parse(date.asString) }.getOrNull()
@@ -144,12 +174,17 @@ data class Coverage(
 }
 
 /** The ZIP is finished in private storage before it is offered to a destination. */
-class VaultArchive(val file: File, val startedAt: Instant = Instant.now()) : AutoCloseable {
+class VaultArchive(
+    val file: File,
+    val startedAt: Instant = Instant.now(),
+    private val onProgress: suspend (VaultArchive, Coverage) -> Unit = { _, _ -> }
+) : AutoCloseable {
     private val zip = ZipOutputStream(file.outputStream().buffered())
     val coverage = mutableListOf<Coverage>()
     val feedStatus = sortedMapOf<String, String>()
     val notes = mutableListOf<String>()
     private val gson = GsonBuilder().serializeNulls().disableHtmlEscaping().create()
+    private var lastProgressAt = 0L
     private fun archiveIO(block: () -> Unit) {
         try { block() } catch (e: IOException) { throw VaultWriteException(e) }
     }
@@ -157,11 +192,19 @@ class VaultArchive(val file: File, val startedAt: Instant = Instant.now()) : Aut
     suspend fun stream(feed: String, type: String, body: suspend (suspend (JsonObject, String) -> Unit) -> Unit) {
         val c = Coverage(feed, type)
         coverage += c
+        onProgress(this, c)
         archiveIO { zip.putNextEntry(ZipEntry("$feed/$type.ndjson")) }
         try {
             body { raw, origin ->
+                currentCoroutineContext().ensureActive()
                 archiveIO { zip.write((gson.toJson(raw) + "\n").toByteArray(Charsets.UTF_8)) }
                 c.observe(raw, origin)
+                val now = System.nanoTime()
+                if (c.records == 1L || now - lastProgressAt >= 1_000_000_000L) {
+                    archiveIO { zip.flush() }
+                    onProgress(this, c)
+                    lastProgressAt = now
+                }
             }
             c.status = "read_complete"
         } catch (e: CancellationException) {
@@ -170,10 +213,11 @@ class VaultArchive(val file: File, val startedAt: Instant = Instant.now()) : Aut
             throw e
         } catch (e: Exception) {
             c.status = "incomplete"
-            c.error = if (e is CloudApiException) e.safeReason else e.javaClass.simpleName
+            c.error = sourceError(e)
         } finally {
             archiveIO { zip.closeEntry() }
         }
+        onProgress(this, c)
     }
 
     fun unavailable(feed: String, type: String, why: String) {
@@ -183,7 +227,7 @@ class VaultArchive(val file: File, val startedAt: Instant = Instant.now()) : Aut
     fun finish(extra: Map<String, Any?> = emptyMap()): JsonObject {
         val manifest = gson.toJsonTree(mapOf(
             "schemaVersion" to 2,
-            "appVersion" to "0.2",
+            "appVersion" to "0.3",
             "generatedAt" to Instant.now().toString(),
             "startedAt" to startedAt.toString(),
             "displayTimezone" to "Europe/London",

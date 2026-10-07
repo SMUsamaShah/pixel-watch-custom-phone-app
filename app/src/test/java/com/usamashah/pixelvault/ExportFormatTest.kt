@@ -6,6 +6,10 @@ import androidx.health.connect.client.units.*
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.async
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import org.junit.Assert.*
 import org.junit.Test
 import java.io.File
@@ -14,6 +18,71 @@ import java.time.ZoneId
 import java.util.zip.ZipFile
 
 class ExportFormatTest {
+    @Test fun stalledProviderReadBecomesAnExplicitTimeout() = runBlocking {
+        try {
+            timedSourceRead(20) { awaitCancellation() }
+            fail("A stalled read must time out")
+        } catch (e: SourceReadException) {
+            assertTrue(e.message!!.contains("Source did not respond"))
+        }
+    }
+
+    @Test fun cancellingAReadRemainsCancellationRatherThanAReadFailure() = runBlocking {
+        val started = CompletableDeferred<Unit>()
+        val read = async { timedSourceRead(5000) { started.complete(Unit); awaitCancellation() } }
+        started.await()
+        read.cancel()
+        try { read.await(); fail("Cancelled read must not return normally") }
+        catch (_: CancellationException) { }
+    }
+
+    @Test fun todayPreviewCountsOnlySamplesInsideTheLocalDay() {
+        val start = Instant.parse("2026-10-06T23:00:00Z")
+        val end = Instant.parse("2026-10-07T14:00:00Z")
+        val record = HeartRateRecord(start.minusSeconds(60), null, end.plusSeconds(60), null,
+            listOf(HeartRateRecord.Sample(start.minusSeconds(1), 60), HeartRateRecord.Sample(start, 61),
+                HeartRateRecord.Sample(end.minusSeconds(1), 72), HeartRateRecord.Sample(end, 80)), Metadata.manualEntry())
+        val preview = PreviewRecords(start, end, ZoneId.of("Europe/London"))
+        preview.observe(record)
+        assertEquals(2L, preview.samples)
+        assertEquals(1L, preview.records)
+        assertEquals(end.minusSeconds(1), preview.latest!!.time)
+        assertEquals("72 bpm", preview.latest!!.value)
+    }
+
+    @Test fun staleSamplesInANewParentIntervalAreNotShownAsTodayData() {
+        val start = Instant.parse("2026-10-06T23:00:00Z")
+        val end = Instant.parse("2026-10-07T14:00:00Z")
+        val old = Instant.parse("2026-09-22T09:26:59Z")
+        val record = HeartRateRecord(old, null, end, null,
+            listOf(HeartRateRecord.Sample(old, 72)), Metadata.manualEntry())
+        val preview = PreviewRecords(start, end, ZoneId.of("Europe/London"))
+        preview.observe(record)
+        assertEquals(0L, preview.records)
+        assertEquals(0L, preview.samples)
+        assertNull(preview.latest)
+        preview.observe(record, restrictToDay = false)
+        assertEquals(old, preview.latest!!.time)
+    }
+
+    @Test fun archiveProgressIsVisibleBeforeFirstReadAndAfterALateFailure() = runBlocking {
+        val file = File.createTempFile("vault-progress", ".zip")
+        val reports = mutableListOf<Pair<Long, String>>()
+        try {
+            VaultArchive(file, onProgress = { _, row -> reports += row.records to row.status }).use { vault ->
+                vault.stream("health-connect", "StepsRecord") { emit ->
+                    emit(JsonParser.parseString("""{"count":500,"startTime":"2026-10-07T12:00:00Z","endTime":"2026-10-07T12:10:00Z"}""").asJsonObject, "phone")
+                    throw SourceReadException("Source did not respond within 60 seconds")
+                }
+                assertEquals("Source did not respond within 60 seconds", vault.coverage.single().error)
+                vault.finish()
+            }
+            assertEquals(0L to "pending", reports.first())
+            assertTrue(reports.contains(1L to "pending"))
+            assertEquals(1L to "incomplete", reports.last())
+        } finally { file.delete() }
+    }
+
     @Test fun emptyPageWithContinuationAndThousandsOfRecordsAreAllRead() = runBlocking {
         var calls = 0
         var count = 0

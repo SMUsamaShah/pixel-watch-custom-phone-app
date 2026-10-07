@@ -2,14 +2,18 @@ apply plugin: 'com.android.application'
 
 android {
     namespace 'com.usamashah.pixelvault'
-    compileSdk 37
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 0
+        }
+    }
 
     defaultConfig {
         applicationId 'com.usamashah.pixelvault'
         minSdk 28
         targetSdk 36
-        versionCode 2
-        versionName '0.2'
+        versionCode 3
+        versionName '0.3'
     }
 
     compileOptions {

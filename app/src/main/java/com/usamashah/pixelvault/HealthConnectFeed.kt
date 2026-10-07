@@ -71,8 +71,9 @@ object HealthConnectFeed {
         }
     }
 
-    suspend fun export(client: HealthConnectClient, vault: VaultArchive, background: Boolean, medical: Boolean) {
-        val granted = client.permissionController.getGrantedPermissions()
+    suspend fun export(client: HealthConnectClient, vault: VaultArchive, background: Boolean, medical: Boolean,
+                       onWait: suspend (String) -> Unit = {}) {
+        val granted = timedSourceRead { client.permissionController.getGrantedPermissions() }
         val backgroundAllowed = !background || BACKGROUND in granted
         vault.feedStatus[FEED] = if (backgroundAllowed) "connected" else "background_permission_missing"
         vault.notes += if (HISTORY in granted) "Health Connect history permission granted."
@@ -89,7 +90,7 @@ object HealthConnectFeed {
                 else -> vault.stream(FEED, name) { emit ->
                     // Open lower boundary: read every accessible historical record, without a date cap.
                     readEveryPage({ token ->
-                        val response = readWithBackoff {
+                        val response = readWithBackoff(onWait = onWait) {
                             client.readRecords(ReadRecordsRequest(
                                 type, TimeRangeFilter.before(vault.startedAt), pageSize = 1000, pageToken = token
                             ))
@@ -121,7 +122,7 @@ object HealthConnectFeed {
                 readEveryPage({ token ->
                     val request = if (token == null) ReadMedicalResourcesInitialRequest(i + 1, emptySet(), 1000)
                         else ReadMedicalResourcesPageRequest(token, 1000)
-                    val response = readWithBackoff { client.readMedicalResources(request) }
+                    val response = readWithBackoff(onWait = onWait) { client.readMedicalResources(request) }
                     Page(response.medicalResources, response.nextPageToken)
                 }) { resource ->
                     sourceIds += resource.dataSourceId
@@ -131,23 +132,27 @@ object HealthConnectFeed {
         }
         if (sourceIds.isNotEmpty()) vault.stream("health-connect-medical", "sources") { emit ->
             for (ids in sourceIds.toList().chunked(100)) {
-                for (source in client.getMedicalDataSources(ids)) {
+                for (source in readWithBackoff(onWait = onWait) { client.getMedicalDataSources(ids) }) {
                     emit(PublicRecordJson.encode(source).asJsonObject, source.id)
                 }
             }
         }
     }
 
-    private suspend fun <T> readWithBackoff(block: suspend () -> T): T {
-        for (attempt in 0..7) {
+    internal suspend fun <T> readWithBackoff(onWait: suspend (String) -> Unit = {}, block: suspend () -> T): T {
+        for (attempt in 0..3) {
             try {
-                val value = block()
+                val value = timedSourceRead { block() }
                 delay(250)
                 return value
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
-                if (attempt == 7 || e.message?.contains("rate limit", ignoreCase = true) != true) throw e
-                delay((15_000L shl attempt).coerceAtMost(120_000L))
+                if (e.message?.contains("rate limit", ignoreCase = true) != true) throw e
+                if (attempt == 3) throw SourceReadException("Health Connect rate limit persisted after 3 retries")
+                val pause = 5_000L shl attempt
+                onWait("Health Connect rate limited this read. Retrying in ${pause / 1000}s (attempt ${attempt + 1}/3)…")
+                delay(pause)
+                onWait("Retrying Health Connect read…")
             }
         }
         error("Unreachable")

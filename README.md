@@ -28,17 +28,36 @@ the export; a separate always-running computer is not required.
 3. Optionally enable medical records. This reads only FHIR resources actually
    stored in Health Connect on this phone, where supported. It does not connect
    to NHS services or import separate blood reports.
-4. Tap **Choose export file (Google Drive or local)**. In Android's picker,
+4. **Today on this phone** loads automatically. Heart rate, steps and last night's
+   sleep appear first; expand **Show / hide other readings** for nine more types.
+   Readings show measurement times and sources. Missing today's readings show
+   the newest accessible historical reading rather than treating old samples
+   or modification times as fresh. Steps use Health Connect's deduplicated total;
+   raw interval records and source counts remain visible separately.
+5. Tap **Choose export file (Google Drive or local)**. In Android's picker,
    choose your private Drive folder, for example `Health connect bkp`, and create
    `Health-Data-Vault.zip`. The original native `Health Connect.zip` is a
    separate export and can remain in that folder.
-5. Tap **Export all accessible history**. The first full scan may take several
-   minutes. Keep the app open during initial setup. The app displays the actual
-   newest measurements for HR, steps, sleep, HRV and resting HR per feed.
-6. After a successful export, optionally enable daily updates. Android controls
+6. Tap **Export all accessible history** after the preview finishes. The app and
+   notification show the active type, record/sample counts, latest measurement,
+   local ZIP size, elapsed time and time since the last progress update. Each
+   Health Connect request has a 60-second timeout; rate-limited reads retry three
+   times with visible pauses. Timeout/partial-read errors remain in the report.
+   **Cancel** stops a pending/running export or preview. The previous completed
+   local ZIP is retained. The destination is written after the local ZIP finishes;
+   file-copy progress is separate from source reads. A full first scan can still
+   take several minutes for large histories. Keep the app open during setup.
+7. After a successful export, optionally enable daily updates. Android controls
    execution time and can delay background jobs. The chosen document provider
    must support persistent write access; failures are shown in the app and the
    completed local ZIP remains available to save again.
+
+**Version 0.3 update:** install the APK over the supplied 0.2 app. It uses the
+same signing key, preserving granted permissions and the chosen destination.
+On first open, the update cancels older jobs, including daily work; enable daily
+updates again after checking the new export. **Save last completed ZIP** copies
+the retained archive to the selected destination without rereading history.
+Choosing a file alone never silently waits for a running full-history scan.
 
 Daily updates currently rescan accessible history to reflect provider edits and
 deletions without treating historical copies as current observations. Large
@@ -145,7 +164,8 @@ The GitHub Actions workflow builds the APK and runs these checks. The APK is at
 `app/build/outputs/apk/debug/app-debug.apk`. Debug APK certificates vary by build
 environment; register the certificate of the APK that you install.
 
-The pinned Health Connect alpha SDK needs AGP 9.1.1 and compile SDK 37.
+The pinned Health Connect alpha SDK needs AGP 9.1.1 and compile SDK 37.0,
+selected explicitly with `release(37) { minorApiLevel = 0 }`.
 Its companion status constants cause false `WrongConstant` lint errors under
 this toolchain. Only the two SDK/feature availability comparisons suppress
 that rule, using the SDK's own declared constants. Other lint errors still
