@@ -4,7 +4,7 @@
 # required; see README.md.
 set -eu
 
-gradle_version="8.11.1"
+gradle_version="9.3.1"
 
 if [ -n "${GRADLE_BIN:-}" ]; then
     exec "$GRADLE_BIN" "$@"

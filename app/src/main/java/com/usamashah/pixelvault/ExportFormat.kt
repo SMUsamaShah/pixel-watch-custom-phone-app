@@ -1,0 +1,257 @@
+package com.usamashah.pixelvault
+
+import com.google.gson.*
+import androidx.health.connect.client.units.*
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
+import java.io.File
+import java.io.IOException
+import java.lang.reflect.Method
+import java.lang.reflect.Modifier
+import java.time.*
+import java.util.concurrent.ConcurrentHashMap
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+
+/** A page size limits memory, never the amount of history exported. */
+data class Page<T>(val records: List<T>, val nextToken: String?)
+
+suspend fun <T> readEveryPage(fetch: suspend (String?) -> Page<T>, consume: suspend (T) -> Unit) {
+    var token: String? = null
+    val seen = HashSet<String>()
+    do {
+        currentCoroutineContext().ensureActive()
+        val page = fetch(token)
+        for (record in page.records) consume(record)
+        token = page.nextToken?.takeIf { it.isNotEmpty() }
+        check(token == null || seen.add(token)) { "Repeated pagination token; export incomplete" }
+    } while (token != null)
+}
+
+class SourceReadException(message: String) : IOException(message)
+
+/** A stalled provider must produce a visible error, not wait indefinitely. */
+suspend fun <T> timedSourceRead(timeoutMillis: Long = 60_000, block: suspend () -> T): T = try {
+    withTimeout(timeoutMillis) { block() }
+} catch (_: TimeoutCancellationException) {
+    // An external cancellation must still cancel the export.
+    currentCoroutineContext().ensureActive()
+    throw SourceReadException("Source did not respond within ${timeoutMillis / 1000} seconds")
+}
+
+fun sourceError(e: Exception): String = when (e) {
+    is CloudApiException -> e.safeReason
+    is SourceReadException -> e.message ?: "Source read failed"
+    is SecurityException -> "Read permission denied by the provider"
+    is IllegalStateException -> if (e.message?.startsWith("Repeated pagination token") == true)
+        "Provider repeated a page token; remaining records could not be read" else e.javaClass.simpleName
+    else -> e.javaClass.simpleName
+}
+
+/** Serialize the SDK's PUBLIC data properties, including nested samples and metadata. */
+object PublicRecordJson {
+    private val methods = ConcurrentHashMap<Class<*>, List<Method>>()
+    private fun quantity(value: Double, unit: String) = JsonObject().apply {
+        addProperty("value", value)
+        addProperty("unit", unit)
+    }
+
+    fun encode(value: Any?): JsonElement = when (value) {
+        null -> JsonNull.INSTANCE
+        is JsonElement -> value
+        is String -> JsonPrimitive(value)
+        is Char -> JsonPrimitive(value)
+        is Number -> JsonPrimitive(value)
+        is Boolean -> JsonPrimitive(value)
+        is Instant, is ZoneOffset, is LocalDate, is LocalDateTime, is Duration -> JsonPrimitive(value.toString())
+        is android.net.Uri -> JsonPrimitive(value.toString())
+        is Length -> quantity(value.inMeters, "m")
+        is Mass -> quantity(value.inGrams, "g")
+        is Energy -> quantity(value.inKilocalories, "kcal")
+        is Power -> quantity(value.inWatts, "W")
+        is Pressure -> quantity(value.inMillimetersOfMercury, "mmHg")
+        is Velocity -> quantity(value.inMetersPerSecond, "m/s")
+        is Volume -> quantity(value.inLiters, "L")
+        is Temperature -> quantity(value.inCelsius, "degC")
+        is TemperatureDelta -> quantity(value.inCelsius, "degC difference")
+        is Percentage -> quantity(value.value, "%")
+        is BloodGlucose -> quantity(value.inMillimolesPerLiter, "mmol/L")
+        is Enum<*> -> JsonPrimitive(value.name)
+        is Iterable<*> -> JsonArray().also { a -> value.forEach { a.add(encode(it)) } }
+        is Map<*, *> -> JsonObject().also { o -> value.forEach { (k, v) -> o.add(k.toString(), encode(v)) } }
+        else -> {
+            val cls = value.javaClass
+            require(cls.name.startsWith("androidx.health.connect.client.")) {
+                "Unsupported public data class ${cls.name}"
+            }
+            val getters = methods.getOrPut(cls) {
+                cls.methods.filter {
+                    !Modifier.isStatic(it.modifiers) && it.parameterCount == 0 &&
+                    it.name != "getClass" && !it.name.contains('$') &&
+                    (it.name.matches(Regex("get[A-Z].*")) || it.name.matches(Regex("is[A-Z].*")))
+                }.sortedBy { it.name }
+            }
+            JsonObject().apply {
+                addProperty("objectType", cls.simpleName)
+                for (getter in getters) {
+                    val name = if (getter.name.startsWith("get")) getter.name.substring(3).replaceFirstChar { it.lowercase() }
+                               else getter.name
+                    add(name, encode(getter.invoke(value)))
+                }
+            }
+        }
+    }
+}
+
+/** Disk failures invalidate the whole archive, unlike a failure reading one source. */
+class VaultWriteException(cause: IOException) : IOException("Unable to write export archive", cause)
+
+data class Coverage(
+    val feed: String,
+    val type: String,
+    var status: String = "pending",
+    var records: Long = 0,
+    var samples: Long = 0,
+    var firstMeasurementAt: String? = null,
+    var latestMeasurementAt: String? = null,
+    var firstMeasurementDate: String? = null,
+    var latestMeasurementDate: String? = null,
+    var error: String? = null,
+    val origins: MutableMap<String, Long> = sortedMapOf()
+) {
+    @Transient private var firstInstant: Instant? = null
+    @Transient private var latestInstant: Instant? = null
+    fun observe(json: JsonObject, origin: String) {
+        records++
+        origins[origin] = (origins[origin] ?: 0) + 1
+        if (type == "PlannedExerciseSessionRecord") return // Scheduled activity is not a measurement.
+        // Inspect measurement fields only. Export, create and modified times do not prove freshness.
+        val values = if (feed == "health-connect") json else json.entrySet()
+            .firstOrNull { it.key !in setOf("name", "dataSource") && it.value.isJsonObject }?.value?.asJsonObject
+        if (values == null) return
+        val sampleArray = values.getAsJsonArray("samples") ?: values.getAsJsonArray("deltas")
+        samples += sampleArray?.size()?.toLong() ?: 0
+        fun addTime(o: JsonObject, key: String) {
+            val v = o.get(key)
+            if (v?.isJsonPrimitive == true) {
+                try {
+                    val t = Instant.parse(v.asString)
+                    if (firstInstant == null || t < firstInstant) {
+                        firstInstant = t; firstMeasurementAt = t.toString()
+                    }
+                    if (latestInstant == null || t > latestInstant) {
+                        latestInstant = t; latestMeasurementAt = t.toString()
+                    }
+                } catch (_: DateTimeException) { }
+            }
+        }
+        // Series parent intervals can extend past the actual last sample.
+        if (sampleArray != null) {
+            for (s in sampleArray) if (s.isJsonObject) addTime(s.asJsonObject, "time")
+        } else {
+            addTime(values, "time")
+            addTime(values, "startTime")
+            addTime(values, "endTime")
+        }
+        values.getAsJsonObject("interval")?.let { addTime(it, "startTime"); addTime(it, "endTime") }
+        values.getAsJsonObject("sampleTime")?.let { addTime(it, "physicalTime") }
+        val date = values.get("date")
+        val localDate = when {
+            date?.isJsonPrimitive == true -> runCatching { LocalDate.parse(date.asString) }.getOrNull()
+            date?.isJsonObject == true -> runCatching {
+                LocalDate.of(date.asJsonObject["year"].asInt, date.asJsonObject["month"].asInt, date.asJsonObject["day"].asInt)
+            }.getOrNull()
+            else -> null
+        }
+        localDate?.toString()?.let { d ->
+            if (firstMeasurementDate == null || d < firstMeasurementDate!!) firstMeasurementDate = d
+            if (latestMeasurementDate == null || d > latestMeasurementDate!!) latestMeasurementDate = d
+        }
+    }
+}
+
+/** The ZIP is finished in private storage before it is offered to a destination. */
+class VaultArchive(
+    val file: File,
+    val startedAt: Instant = Instant.now(),
+    private val onProgress: suspend (VaultArchive, Coverage) -> Unit = { _, _ -> }
+) : AutoCloseable {
+    private val zip = ZipOutputStream(file.outputStream().buffered())
+    val coverage = mutableListOf<Coverage>()
+    val feedStatus = sortedMapOf<String, String>()
+    val notes = mutableListOf<String>()
+    private val gson = GsonBuilder().serializeNulls().disableHtmlEscaping().create()
+    private var lastProgressAt = 0L
+    private fun archiveIO(block: () -> Unit) {
+        try { block() } catch (e: IOException) { throw VaultWriteException(e) }
+    }
+
+    suspend fun stream(feed: String, type: String, body: suspend (suspend (JsonObject, String) -> Unit) -> Unit) {
+        val c = Coverage(feed, type)
+        coverage += c
+        onProgress(this, c)
+        archiveIO { zip.putNextEntry(ZipEntry("$feed/$type.ndjson")) }
+        try {
+            body { raw, origin ->
+                currentCoroutineContext().ensureActive()
+                archiveIO { zip.write((gson.toJson(raw) + "\n").toByteArray(Charsets.UTF_8)) }
+                c.observe(raw, origin)
+                val now = System.nanoTime()
+                if (c.records == 1L || now - lastProgressAt >= 1_000_000_000L) {
+                    archiveIO { zip.flush() }
+                    onProgress(this, c)
+                    lastProgressAt = now
+                }
+            }
+            c.status = "read_complete"
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: VaultWriteException) {
+            throw e
+        } catch (e: Exception) {
+            c.status = "incomplete"
+            c.error = sourceError(e)
+        } finally {
+            archiveIO { zip.closeEntry() }
+        }
+        onProgress(this, c)
+    }
+
+    fun unavailable(feed: String, type: String, why: String) {
+        coverage += Coverage(feed, type, status = why)
+    }
+
+    fun finish(extra: Map<String, Any?> = emptyMap()): JsonObject {
+        val manifest = gson.toJsonTree(mapOf(
+            "schemaVersion" to 2,
+            "appVersion" to "0.3",
+            "generatedAt" to Instant.now().toString(),
+            "startedAt" to startedAt.toString(),
+            "displayTimezone" to "Europe/London",
+            "historyMode" to "all accessible history; no app record or page cap",
+            "feeds" to feedStatus,
+            "coverage" to coverage,
+            "notes" to notes,
+            "details" to extra,
+            "interpretation" to listOf(
+                "Keep feeds and origins separate. Overlapping records are not independent quantities.",
+                "Raw step, distance and energy sums are not deduplicated aggregates.",
+                "Sample-average heart rate is not resting heart rate. Preserve actual RHR and RMSSD fields.",
+                "Sleep intervals and sleep stages are distinct; preserve both without adding duplicate sessions.",
+                "read_complete means all pages returned by the API were read, not proof that a wearable exported everything.",
+                "Medical resources, when enabled, include only records actually stored in Health Connect."
+            )
+        )).asJsonObject
+        archiveIO {
+            zip.putNextEntry(ZipEntry("manifest.json"))
+            zip.write(gson.toJson(manifest).toByteArray(Charsets.UTF_8))
+            zip.closeEntry()
+        }
+        return manifest
+    }
+
+    override fun close() = zip.close()
+}

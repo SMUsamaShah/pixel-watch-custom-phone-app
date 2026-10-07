@@ -1,16 +1,19 @@
 apply plugin: 'com.android.application'
-apply plugin: 'org.jetbrains.kotlin.android'
 
 android {
     namespace 'com.usamashah.pixelvault'
-    compileSdk 36
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 0
+        }
+    }
 
     defaultConfig {
         applicationId 'com.usamashah.pixelvault'
         minSdk 28
         targetSdk 36
-        versionCode 1
-        versionName '0.1'
+        versionCode 3
+        versionName '0.3'
     }
 
     compileOptions {
@@ -18,15 +21,17 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = '17'
-    }
 }
 
 dependencies {
     implementation 'androidx.core:core-ktx:1.16.0'
     implementation 'androidx.activity:activity-ktx:1.10.1'
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.9.2'
-    implementation 'androidx.health.connect:connect-client:1.1.0'
+    implementation 'androidx.health.connect:connect-client:1.2.0-alpha06'
+    implementation 'androidx.work:work-runtime-ktx:2.10.1'
+    implementation 'com.google.android.gms:play-services-auth:22.0.0'
+    implementation 'com.google.code.gson:gson:2.13.2'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.10.2'
+    testImplementation 'junit:junit:4.13.2'
 }

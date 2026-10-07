@@ -1,0 +1,12 @@
+Pixel Data Vault 0.2 / 0.3
+Package: com.usamashah.pixelvault
+APKs: Pixel-Data-Vault-0.2.apk, Pixel-Data-Vault-0.3.apk
+Certificate SHA-1: 06:6E:D6:04:82:C9:77:6D:9A:62:0A:98:A3:B8:C1:63:CC:3D:8B:4C
+Certificate SHA-256: 2E:E3:6A:ED:32:EA:69:40:30:F4:00:6A:ED:FC:1A:4C:A3:F6:72:F2:14:AE:25:BB:4D:6C:80:4B:B2:40:CB:B8
+
+This public certificate identifies the APKs delivered on 6 and 7 October 2026.
+Version 0.3 uses the same certificate so it can update 0.2 in place.
+Register this package/SHA-1 pair as an Android OAuth client only within a
+Google Health API project that Google has approved. Approval is still required.
+The private signing key is kept outside the repository for future updates.
+CI-generated debug APKs use a different certificate; match the exact installed APK.
